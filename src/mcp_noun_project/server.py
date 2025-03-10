@@ -132,36 +132,47 @@ async def download_icon_as_image(
     Returns:
         The icon as an image.
     """
-    client = ctx.request_context.lifespan_context.client
-    result = await client.download_icon(
-        icon_id=icon_id,
-        color=color,
-        filetype="png",
-        size=size,
-    )
-    
-    # Get the icon data
-    icon_data = result.get("icon", {})
-    
-    # Get the preview URL from the icon data
-    icon_url = icon_data.get("preview_url") or icon_data.get("thumbnail_url")
-    
-    if not icon_url:
-        raise ValueError("No preview URL found in the API response")
-    
-    # Download the image
     import httpx
-    async with httpx.AsyncClient() as client:
-        response = await client.get(icon_url)
-        response.raise_for_status()
-        image_data = response.content
+    import traceback
     
-    # Return the image as an MCP Image
-    return ImageContent(
-        type="image",
-        data=image_data,
-        format="png",
-    )
+    try:
+        client = ctx.request_context.lifespan_context.client
+        
+        # Get the icon download URL
+        try:
+            icon_url = await client.get_icon_download_url(
+                icon_id=icon_id,
+                color=color,
+                size=size,
+            )
+        except Exception as e:
+            ctx.error(f"Failed to get icon URL: {str(e)}")
+            raise ValueError(f"Failed to get download URL for icon {icon_id}: {str(e)}")
+        
+        # Download the image
+        try:
+            async with httpx.AsyncClient() as http_client:
+                response = await http_client.get(icon_url)
+                response.raise_for_status()
+                image_data = response.content
+        except Exception as e:
+            ctx.error(f"Failed to download icon: {str(e)}")
+            raise ValueError(f"Failed to download icon from URL {icon_url}: {str(e)}")
+        
+        # Return the image as an MCP Image
+        # Convert the binary data to base64 string
+        import base64
+        encoded_data = base64.b64encode(image_data).decode('utf-8')
+        
+        return ImageContent(
+            type="image",
+            data=encoded_data,
+            mimeType="image/png",
+        )
+    
+    except Exception as e:
+        ctx.error(f"Error in download_icon_as_image: {str(e)}\n{traceback.format_exc()}")
+        raise
 
 
 @mcp.tool()
@@ -277,50 +288,70 @@ async def download_icon_to_file(
     """
     import os
     import httpx
+    import traceback
     from pathlib import Path
     
-    client = ctx.request_context.lifespan_context.client
-    result = await client.download_icon(
-        icon_id=icon_id,
-        color=color,
-        filetype="png",
-        size=size,
-    )
+    try:
+        client = ctx.request_context.lifespan_context.client
+        
+        # Get the icon download URL
+        try:
+            icon_url = await client.get_icon_download_url(
+                icon_id=icon_id,
+                color=color,
+                size=size,
+            )
+            
+            # Also get the icon details for the name
+            result = await client.get_icon_by_id(
+                icon_id=icon_id,
+                thumbnail_size=size,
+            )
+            icon_data = result.get("icon", {})
+            icon_name = icon_data.get("name", f"icon_{icon_id}")
+            
+        except Exception as e:
+            ctx.error(f"Failed to get icon URL: {str(e)}")
+            raise ValueError(f"Failed to get download URL for icon {icon_id}: {str(e)}")
+        
+        # Sanitize the icon name for use in a filename
+        import re
+        safe_name = re.sub(r'[^\w\-_.]', '_', icon_name)
+        
+        # Determine the output file path
+        output_path = Path(output_path)
+        
+        if output_path.is_dir():
+            # If output_path is a directory, create a filename using the icon name
+            file_path = output_path / f"{safe_name}_{icon_id}.png"
+        else:
+            # If output_path is not a directory, use it directly (creating parent dirs if needed)
+            os.makedirs(output_path.parent, exist_ok=True)
+            file_path = output_path
+        
+        # Download the image
+        try:
+            async with httpx.AsyncClient() as http_client:
+                response = await http_client.get(icon_url)
+                response.raise_for_status()
+                image_data = response.content
+        except Exception as e:
+            ctx.error(f"Failed to download icon: {str(e)}")
+            raise ValueError(f"Failed to download icon from URL {icon_url}: {str(e)}")
+        
+        # Save the image to the file
+        try:
+            with open(file_path, "wb") as f:
+                f.write(image_data)
+        except Exception as e:
+            ctx.error(f"Failed to save icon to file: {str(e)}")
+            raise ValueError(f"Failed to save icon to file {file_path}: {str(e)}")
+        
+        return str(file_path)
     
-    # Get the icon URL and name from the response
-    icon_data = result.get("icon", {})
-    icon_url = icon_data.get("preview_url")
-    icon_name = icon_data.get("name", f"icon_{icon_id}")
-    
-    if not icon_url:
-        raise ValueError("No preview URL found in the API response")
-    
-    # Sanitize the icon name for use in a filename
-    import re
-    safe_name = re.sub(r'[^\w\-_.]', '_', icon_name)
-    
-    # Determine the output file path
-    output_path = Path(output_path)
-    
-    if output_path.is_dir():
-        # If output_path is a directory, create a filename using the icon name
-        file_path = output_path / f"{safe_name}_{icon_id}.png"
-    else:
-        # If output_path is not a directory, use it directly (creating parent dirs if needed)
-        os.makedirs(output_path.parent, exist_ok=True)
-        file_path = output_path
-    
-    # Download the image
-    async with httpx.AsyncClient() as client:
-        response = await client.get(icon_url)
-        response.raise_for_status()
-        image_data = response.content
-    
-    # Save the image to the file
-    with open(file_path, "wb") as f:
-        f.write(image_data)
-    
-    return str(file_path)
+    except Exception as e:
+        ctx.error(f"Error in download_icon_to_file: {str(e)}\n{traceback.format_exc()}")
+        raise
 
 
 @mcp.tool()
@@ -351,75 +382,95 @@ async def search_and_download_icons(
     import os
     import httpx
     import asyncio
+    import traceback
     from pathlib import Path
     import re
     
-    # Ensure the output directory exists
-    output_dir = Path(output_directory)
-    os.makedirs(output_dir, exist_ok=True)
-    
-    # Search for icons
-    client = ctx.request_context.lifespan_context.client
-    search_result = await client.search_icons(
-        query=query,
-        limit=limit,
-        public_domain_only=public_domain_only,
-    )
-    
-    icons = search_result.get("icons", [])
-    if not icons:
-        return []
-    
-    saved_files = []
-    
-    # Process each icon
-    for icon in icons:
+    try:
+        # Ensure the output directory exists
+        output_dir = Path(output_directory)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Search for icons
+        client = ctx.request_context.lifespan_context.client
+        
         try:
-            icon_id = icon.get("id")
-            icon_name = icon.get("name", f"icon_{icon_id}")
-            
-            # Sanitize the icon name for use in a filename
-            safe_name = re.sub(r'[^\w\-_.]', '_', icon_name)
-            file_path = output_dir / f"{safe_name}_{icon_id}.png"
-            
-            # Download the icon
-            download_result = await client.download_icon(
-                icon_id=icon_id,
-                color=color,
-                filetype="png",
-                size=size,
+            search_result = await client.search_icons(
+                query=query,
+                limit=limit,
+                public_domain_only=public_domain_only,
             )
-            
-            # Get the icon data
-            icon_data = download_result.get("icon", {})
-            
-            # Get the preview URL from the icon data
-            icon_url = icon_data.get("preview_url") or icon_data.get("thumbnail_url")
-            
-            if not icon_url:
-                ctx.warning(f"No preview URL found for icon {icon_id}, skipping")
-                continue
-            
-            # Download the image
-            async with httpx.AsyncClient() as http_client:
-                response = await http_client.get(icon_url)
-                response.raise_for_status()
-                image_data = response.content
-            
-            # Save the image to a file
-            with open(file_path, "wb") as f:
-                f.write(image_data)
-            
-            saved_files.append(str(file_path))
-            ctx.info(f"Downloaded icon {icon_id} to {file_path}")
-            
-            # Add a small delay between downloads to avoid rate limiting
-            await asyncio.sleep(0.2)
-            
         except Exception as e:
-            ctx.error(f"Error downloading icon {icon.get('id')}: {str(e)}")
+            ctx.error(f"Failed to search for icons: {str(e)}")
+            raise ValueError(f"Failed to search for icons with query '{query}': {str(e)}")
+        
+        icons = search_result.get("icons", [])
+        if not icons:
+            ctx.warning(f"No icons found for query '{query}'")
+            return []
+        
+        saved_files = []
+        
+        # Process each icon
+        for icon in icons:
+            try:
+                icon_id = icon.get("id")
+                icon_name = icon.get("name", f"icon_{icon_id}")
+                
+                if not icon_id:
+                    ctx.warning(f"No ID found for icon, skipping")
+                    continue
+                
+                # Sanitize the icon name for use in a filename
+                safe_name = re.sub(r'[^\w\-_.]', '_', icon_name)
+                file_path = output_dir / f"{safe_name}_{icon_id}.png"
+                
+                # Get the icon URL
+                try:
+                    icon_url = await client.get_icon_download_url(
+                        icon_id=icon_id,
+                        color=color,
+                        size=size,
+                    )
+                except Exception as e:
+                    ctx.warning(f"Failed to get URL for icon {icon_id}: {str(e)}")
+                    continue
+                
+                # Download the image
+                try:
+                    async with httpx.AsyncClient() as http_client:
+                        response = await http_client.get(icon_url)
+                        response.raise_for_status()
+                        image_data = response.content
+                except Exception as e:
+                    ctx.warning(f"Failed to download icon {icon_id}: {str(e)}")
+                    continue
+                
+                # Save the image to a file
+                try:
+                    with open(file_path, "wb") as f:
+                        f.write(image_data)
+                except Exception as e:
+                    ctx.warning(f"Failed to save icon {icon_id} to file: {str(e)}")
+                    continue
+                
+                saved_files.append(str(file_path))
+                ctx.info(f"Downloaded icon {icon_id} to {file_path}")
+                
+                # Add a small delay between downloads to avoid rate limiting
+                await asyncio.sleep(0.2)
+                
+            except Exception as e:
+                ctx.warning(f"Error processing icon {icon.get('id', 'unknown')}: {str(e)}")
+        
+        if not saved_files:
+            ctx.warning("Failed to download any icons")
+        
+        return saved_files
     
-    return saved_files
+    except Exception as e:
+        ctx.error(f"Error in search_and_download_icons: {str(e)}\n{traceback.format_exc()}")
+        raise
 
 
 @mcp.tool()

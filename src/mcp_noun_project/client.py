@@ -113,7 +113,13 @@ class NounProjectClient:
         """Get download information for an icon."""
         # For the download endpoint, we'll just use get_icon_by_id 
         # as the API doesn't provide a direct download API
-        return await self.get_icon_by_id(icon_id, thumbnail_size=size or 200)
+        icon_result = await self.get_icon_by_id(icon_id, thumbnail_size=size or 200)
+        
+        # Ensure we got a valid response
+        if not icon_result or "icon" not in icon_result:
+            raise ValueError(f"Failed to get icon with ID {icon_id}")
+            
+        return icon_result
         
     async def get_icon_download_url(
         self,
@@ -123,10 +129,24 @@ class NounProjectClient:
     ) -> str:
         """Get the download URL for an icon."""
         result = await self.get_icon_by_id(icon_id, thumbnail_size=size or 200)
+        if not result:
+            raise ValueError(f"Failed to get icon with ID {icon_id}")
+            
         icon = result.get("icon", {})
+        if not icon:
+            raise ValueError(f"No icon data found for icon {icon_id}")
         
         # Get the preview URL from the icon data
-        preview_url = icon.get("preview_url") or icon.get("thumbnail_url")
+        # First try preview_url, then thumbnail_url, then preview_url_84, etc.
+        preview_url = (
+            icon.get("preview_url") or 
+            icon.get("thumbnail_url") or 
+            icon.get(f"preview_url_{size or 200}") or 
+            icon.get("preview_url_84") or 
+            icon.get("preview_url_42") or
+            icon.get("preview_url_200")
+        )
+        
         if not preview_url:
             raise ValueError(f"No preview URL found for icon {icon_id}")
             
