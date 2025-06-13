@@ -2,6 +2,8 @@
 
 A Model Context Protocol (MCP) server for interfacing with The Noun Project API.
 
+> **Note:** This code was AI generated and has not yet been deployed to PyPI.
+
 ## Installation
 
 ```bash
